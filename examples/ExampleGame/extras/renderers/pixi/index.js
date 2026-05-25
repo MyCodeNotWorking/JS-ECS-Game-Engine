@@ -1,0 +1,1 @@
+export { default as createPixiRenderer } from "./pixiRendererPlugin.js";
