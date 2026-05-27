@@ -20,10 +20,12 @@ async function createApp(options = {}) {
 	const DESIGN_WIDTH = 800;
 	const DESIGN_HEIGHT = 600;
 
+	/*
+	Debug box to ensure that this plugin is working
 	const box = new Graphics().rect(0, 0, 200, 150).fill("aqua")
 	box.x = DESIGN_WIDTH / 2 - 100;
 	box.y = DESIGN_HEIGHT / 2 - 75;
-	app.stage.addChild(box);
+	app.stage.addChild(box);*/
 
 	function resize() {
 		const screenWidth = window.innerWidth;
@@ -61,18 +63,20 @@ function destroyApp(app) {
 }
 
 function createPixiRenderer(options = {}) {
-	return {
-		app: null,
+    return {
+        app: null,
 
-		async install(world) {
-			this.app = await createApp(options);
-		},
+        async init(options) {
+            this.app = await createApp(options);
+        },
 
-		uninstall(world) {
-			destroyApp(this.app);
-			this.app = null;
-		}
-	};
+        install(world) {},  // sync, nothing to do — init already ran
+
+        uninstall(world) {
+            destroyApp(this.app);
+            this.app = null;
+        }
+    };
 }
 
 export default createPixiRenderer;

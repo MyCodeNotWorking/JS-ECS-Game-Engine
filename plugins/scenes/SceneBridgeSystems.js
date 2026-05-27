@@ -1,4 +1,4 @@
-import { System } from "../../../../engine/src/index.js";
+import { System } from '../../engine/src/index.js';
 
 class SceneUpdateBridge extends System {
     constructor(sceneManager) {
@@ -6,7 +6,7 @@ class SceneUpdateBridge extends System {
         this.sceneManager = sceneManager;
     }
     update(world, dt) {
-        this.sceneManager.update(dt);
+        this.sceneManager.update(world, dt);
     }
 }
 
@@ -16,7 +16,7 @@ class SceneFixedBridge extends System {
         this.sceneManager = sceneManager;
     }
     fixedUpdate(world, dt) {
-        this.sceneManager.fixedUpdate(dt);
+        this.sceneManager.fixedUpdate(world, dt);
     }
 }
 
@@ -26,7 +26,7 @@ class SceneLateBridge extends System {
         this.sceneManager = sceneManager;
     }
     lateUpdate(world, dt) {
-        this.sceneManager.lateUpdate(dt);
+        this.sceneManager.lateUpdate(world, dt);
     }
 }
 

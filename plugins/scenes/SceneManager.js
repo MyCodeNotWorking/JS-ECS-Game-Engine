@@ -1,6 +1,4 @@
-// src/extras/sceneManager.js
-import { EngineError } from '../../../../engine/src/index.js';
-import { SceneUpdateBridge, SceneFixedBridge, SceneLateBridge } from "./index.js";
+import { EngineError } from '../../engine/src/index.js';
 
 function assertName(name) {
     if (typeof name !== 'string' || name.length === 0) {
@@ -22,20 +20,11 @@ function assertScene(scene) {
 }
 
 class SceneManager {
-    constructor(world) {
-        if (!world || typeof world !== 'object') {
-            throw new EngineError('E_SCENE_WORLD', 'SceneManager requires a world instance.');
-        }
-
-        this.world = world;
+    constructor() {
         this._scenes = new Map();
         this._current = null;
         this._currentName = null;
         this._transitioning = false;
-
-        this.world.registerSystem(new SceneUpdateBridge(this));
-        this.world.registerSystem(new SceneFixedBridge(this));
-        this.world.registerSystem(new SceneLateBridge(this));
     }
 
     register(name, scene) {
@@ -81,7 +70,7 @@ class SceneManager {
         return Array.from(this._scenes.keys());
     }
 
-    load(name, data = undefined) {
+    load(world, name, data = undefined) {
         assertName(name);
 
         const next = this._scenes.get(name);
@@ -97,7 +86,7 @@ class SceneManager {
 
         try {
             if (this._current && typeof this._current.exit === 'function') {
-                this._current.exit(this.world, this._current.data);
+                this._current.exit(world, this._current.data);
             }
 
             this._current = next;
@@ -105,7 +94,7 @@ class SceneManager {
             this._current.data = data;
 
             if (typeof next.enter === 'function') {
-                next.enter(this.world, data);
+                next.enter(world, data);
             }
 
             return next;
@@ -114,18 +103,18 @@ class SceneManager {
         }
     }
 
-    reload(data = undefined) {
+    reload(world, data = undefined) {
         if (!this._currentName) {
             throw new EngineError('E_SCENE_EMPTY', 'No current scene to reload.');
         }
-        return this.load(this._currentName, data);
+        return this.load(world, this._currentName, data);
     }
 
-    unload() {
+    unload(world) {
         if (!this._current) return false;
 
         if (typeof this._current.exit === 'function') {
-            this._current.exit(this.world, this._current.data);
+            this._current.exit(world, this._current.data);
         }
 
         this._current = null;
@@ -133,26 +122,26 @@ class SceneManager {
         return true;
     }
 
-    update(dt) {
+    update(world, dt) {
         if (this._current && typeof this._current.update === 'function') {
-            this._current.update(this.world, dt, this._current.data);
+            this._current.update(world, dt, this._current.data);
         }
     }
 
-    fixedUpdate(dt) {
+    fixedUpdate(world, dt) {
         if (this._current && typeof this._current.fixedUpdate === 'function') {
-            this._current.fixedUpdate(this.world, dt, this._current.data);
+            this._current.fixedUpdate(world, dt, this._current.data);
         }
     }
 
-    lateUpdate(dt) {
+    lateUpdate(world, dt) {
         if (this._current && typeof this._current.lateUpdate === 'function') {
-            this._current.lateUpdate(this.world, dt, this._current.data);
+            this._current.lateUpdate(world, dt, this._current.data);
         }
     }
 
-    clear() {
-        this.unload();
+    clear(world) {
+        this.unload(world);
         this._scenes.clear();
     }
 }
