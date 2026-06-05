@@ -62,12 +62,15 @@ function destroyApp(app) {
 	});
 }
 
-function createPixiRenderer(options = {}) {
+function createPixiRenderer(defaultOptions = {}) {
     return {
         app: null,
 
-        async init(options) {
-            this.app = await createApp(options);
+        async init(runtimeOptions = {}) {
+            this.app = await createApp({
+            	...defaultOptions,
+            	...runtimeOptions,
+            });
         },
 
         install(world) {},  // sync, nothing to do — init already ran
