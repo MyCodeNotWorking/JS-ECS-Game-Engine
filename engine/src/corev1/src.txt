@@ -1,0 +1,911 @@
+// src/core/componentRegistry.js
+import { EngineError } from './errors.js';
+import { ComponentStorage } from './componentStorage.js';
+
+function isPlainObject(value) {
+    return value !== null && typeof value === 'object' && Object.getPrototypeOf(value) === Object.prototype;
+}
+
+export class ComponentRegistry {
+    constructor() {
+        this._definitions = new Map();
+    }
+
+    define(name, schema) {
+        if (typeof name !== 'string' || name.length === 0) {
+            throw new EngineError('E_COMPONENT_NAME', 'Component name must be a non-empty string.');
+        }
+        if (!isPlainObject(schema)) {
+            throw new EngineError('E_COMPONENT_SCHEMA', `Schema for "${name}" must be a plain object.`);
+        }
+        if (this._definitions.has(name)) {
+            throw new EngineError('E_COMPONENT_EXISTS', `Component "${name}" is already defined.`);
+        }
+
+        const storage = new ComponentStorage(name, schema);
+        const definition = { name, schema: storage.schema, storage };
+        this._definitions.set(name, definition);
+        return definition;
+    }
+
+    has(name) {
+        return this._definitions.has(name);
+    }
+
+    get(name) {
+        return this._definitions.get(name);
+    }
+
+    storage(name) {
+        const definition = this._definitions.get(name);
+        if (!definition) {
+            throw new EngineError('E_COMPONENT_UNKNOWN', `Component "${name}" is not defined.`);
+        }
+        return definition.storage;
+    }
+
+    remove(name) {
+        const definition = this._definitions.get(name);
+        if (!definition) return false;
+        definition.storage.clear();
+        this._definitions.delete(name);
+        return true;
+    }
+
+    clear() {
+        for (const definition of this._definitions.values()) {
+            definition.storage.clear();
+        }
+        this._definitions.clear();
+    }
+
+    names() {
+        return Array.from(this._definitions.keys());
+    }
+
+    forEachStorage(fn) {
+        for (const definition of this._definitions.values()) {
+            fn(definition.storage, definition);
+        }
+    }
+}
+
+// src/core/componentStorage.js
+import { EngineError } from './errors.js';
+
+function cloneValue(value) {
+    if (typeof value === 'function') {
+        return value();
+    }
+
+    if (value && typeof value === 'object') {
+        if (typeof structuredClone === 'function') {
+            return structuredClone(value);
+        }
+        return Array.isArray(value) ? value.slice() : { ...value };
+    }
+
+    return value;
+}
+
+function isPlainObject(value) {
+    return value !== null && typeof value === 'object' && Object.getPrototypeOf(value) === Object.prototype;
+}
+
+function resolveDefault(definition) {
+    if (definition && typeof definition === 'object' && !Array.isArray(definition) && Object.prototype.hasOwnProperty.call(definition, 'default')) {
+        return cloneValue(definition.default);
+    }
+    return cloneValue(definition);
+}
+
+export class ComponentStorage {
+    constructor(name, schema) {
+        if (typeof name !== 'string' || name.length === 0) {
+            throw new EngineError('E_COMPONENT_NAME', 'Component name must be a non-empty string.');
+        }
+        if (!isPlainObject(schema)) {
+            throw new EngineError('E_COMPONENT_SCHEMA', `Schema for "${name}" must be a plain object.`);
+        }
+
+        this.name = name;
+        this.schema = Object.freeze({ ...schema });
+        this._entities = [];
+        this._values = [];
+        this._index = new Map();
+    }
+
+    has(entity) {
+        return this._index.has(entity);
+    }
+
+    get(entity) {
+        const index = this._index.get(entity);
+        if (index === undefined) return undefined;
+        return this._values[index];
+    }
+
+    set(entity, value) {
+        if (this._index.has(entity)) {
+            this._values[this._index.get(entity)] = value;
+            return value;
+        }
+
+        const index = this._entities.length;
+        this._entities.push(entity);
+        this._values.push(value);
+        this._index.set(entity, index);
+        return value;
+    }
+
+    create(entity, data = {}) {
+        if (!isPlainObject(data)) {
+            throw new EngineError('E_COMPONENT_DATA', `Component data for "${this.name}" must be a plain object.`);
+        }
+
+        const value = {};
+        for (const key of Object.keys(this.schema)) {
+            if (Object.prototype.hasOwnProperty.call(data, key)) {
+                value[key] = data[key];
+            } else {
+                value[key] = resolveDefault(this.schema[key]);
+            }
+        }
+
+        for (const key of Object.keys(data)) {
+            if (!Object.prototype.hasOwnProperty.call(this.schema, key)) {
+                throw new EngineError(
+                    'E_COMPONENT_FIELD',
+                    `Unknown field "${key}" for component "${this.name}".`
+                );
+            }
+        }
+
+        return this.set(entity, value);
+    }
+
+    delete(entity) {
+        const index = this._index.get(entity);
+        if (index === undefined) return false;
+
+        const lastIndex = this._entities.length - 1;
+        const lastEntity = this._entities[lastIndex];
+
+        if (index !== lastIndex) {
+            this._entities[index] = lastEntity;
+            this._values[index] = this._values[lastIndex];
+            this._index.set(lastEntity, index);
+        }
+
+        this._entities.pop();
+        this._values.pop();
+        this._index.delete(entity);
+        return true;
+    }
+
+    clear() {
+        this._entities.length = 0;
+        this._values.length = 0;
+        this._index.clear();
+    }
+
+    size() {
+        return this._entities.length;
+    }
+
+    entities() {
+        return this._entities.slice();
+    }
+
+    entries() {
+        return this._entities.map((entity, index) => [entity, this._values[index]]);
+    }
+
+    forEach(fn) {
+        for (let i = 0; i < this._entities.length; i += 1) {
+            fn(this._values[i], this._entities[i], this);
+        }
+    }
+}
+
+// src/core/engine.js
+import { EngineError } from './errors.js';
+import { World } from './world.js';
+
+function nowMs() {
+    if (typeof performance !== 'undefined' && typeof performance.now === 'function') {
+        return performance.now();
+    }
+    return Date.now();
+}
+
+export class Engine {
+    constructor({
+        world = new World(),
+        fixedDelta = 1 / 60,
+        timeScale = 1
+    } = {}) {
+        if (!(fixedDelta > 0)) {
+            throw new EngineError('E_FIXED_DELTA', 'fixedDelta must be greater than 0.');
+        }
+        if (!(timeScale > 0)) {
+            throw new EngineError('E_TIMESCALE', 'timeScale must be greater than 0.');
+        }
+
+        this.world = world;
+        this.fixedDelta = fixedDelta;
+        this.timeScale = timeScale;
+
+        this.running = false;
+        this.paused = false;
+
+        this._lastTime = 0;
+        this._accumulator = 0;
+        this._frameHandle = null;
+
+        this._raf = typeof globalThis.requestAnimationFrame === 'function'
+            ? globalThis.requestAnimationFrame.bind(globalThis)
+            : null;
+
+        this._caf = typeof globalThis.cancelAnimationFrame === 'function'
+            ? globalThis.cancelAnimationFrame.bind(globalThis)
+            : null;
+
+        this._boundTick = (time) => this._tick(time);
+    }
+
+    start() {
+        if (this.running && !this.paused) return;
+
+        this.running = true;
+        this.paused = false;
+        this._lastTime = nowMs();
+        this._accumulator = 0;
+
+        this.world.notifyLifecycle('start');
+
+        this._scheduleNext();
+    }
+
+    pause() {
+        if (!this.running || this.paused) return;
+        this.paused = true;
+        this.world.notifyLifecycle('pause');
+        this._cancelNext();
+    }
+
+    stop() {
+        if (!this.running) return;
+        this.running = false;
+        this.paused = false;
+        this._accumulator = 0;
+        this._cancelNext();
+        this.world.notifyLifecycle('stop');
+    }
+
+    _scheduleNext() {
+        if (!this.running || this.paused) return;
+
+        if (this._raf) {
+            this._frameHandle = this._raf(this._boundTick);
+        } else {
+            this._frameHandle = setTimeout(() => this._boundTick(nowMs()), 16);
+        }
+    }
+
+    _cancelNext() {
+        if (this._frameHandle === null) return;
+
+        if (this._raf && this._caf) {
+            this._caf(this._frameHandle);
+        } else {
+            clearTimeout(this._frameHandle);
+        }
+
+        this._frameHandle = null;
+    }
+
+    _tick(timestamp) {
+        if (!this.running || this.paused) return;
+
+        const current = typeof timestamp === 'number' ? timestamp : nowMs();
+        let dt = (current - this._lastTime) / 1000;
+        this._lastTime = current;
+
+        if (!Number.isFinite(dt) || dt < 0) dt = 0;
+        if (dt > 0.25) dt = 0.25;
+        dt *= this.timeScale;
+
+        this._accumulator += dt;
+
+        this.world.update(dt);
+
+        while (this._accumulator >= this.fixedDelta) {
+            this.world.fixedUpdate(this.fixedDelta);
+            this._accumulator -= this.fixedDelta;
+        }
+
+        this.world.lateUpdate(dt);
+        this._scheduleNext();
+    }
+}
+
+// src/core/entityManager.js
+import { EngineError } from './errors.js';
+
+export class EntityManager {
+    constructor() {
+        this._nextId = 1;
+        this._freeIds = [];
+        this._alive = new Map(); // id -> dense index
+        this._entities = [];
+    }
+
+    create() {
+        const id = this._freeIds.length > 0 ? this._freeIds.pop() : this._nextId++;
+        if (this._alive.has(id)) {
+            throw new EngineError('E_ENTITY_CREATE', `Entity ${id} already exists.`);
+        }
+
+        this._alive.set(id, this._entities.length);
+        this._entities.push(id);
+        return id;
+    }
+
+    destroy(id) {
+        if (!this._alive.has(id)) return false;
+
+        const index = this._alive.get(id);
+        const lastIndex = this._entities.length - 1;
+        const lastId = this._entities[lastIndex];
+
+        if (index !== lastIndex) {
+            this._entities[index] = lastId;
+            this._alive.set(lastId, index);
+        }
+
+        this._entities.pop();
+        this._alive.delete(id);
+        this._freeIds.push(id);
+        return true;
+    }
+
+    has(id) {
+        return this._alive.has(id);
+    }
+
+    clear() {
+        this._nextId = 1;
+        this._freeIds.length = 0;
+        this._alive.clear();
+        this._entities.length = 0;
+    }
+
+    count() {
+        return this._entities.length;
+    }
+
+    all() {
+        return this._entities.slice();
+    }
+
+    _indexOf(id) {
+        return this._alive.get(id);
+    }
+}
+
+// src/core/errors.js
+export class EngineError extends Error {
+    constructor(code, message, details = undefined) {
+        super(message);
+        this.name = 'EngineError';
+        this.code = code;
+        this.details = details;
+    }
+}
+
+// src/core/eventBus.js
+import { EngineError } from './errors.js';
+
+export class EventBus {
+    constructor() {
+        this._listeners = new Map();
+    }
+
+    on(type, handler) {
+        if (typeof type !== 'string' || type.length === 0) {
+            throw new EngineError('E_EVENT_TYPE', 'Event type must be a non-empty string.');
+        }
+        if (typeof handler !== 'function') {
+            throw new EngineError('E_EVENT_HANDLER', 'Event handler must be a function.');
+        }
+
+        let set = this._listeners.get(type);
+        if (!set) {
+            set = new Set();
+            this._listeners.set(type, set);
+        }
+
+        set.add(handler);
+        return () => this.off(type, handler);
+    }
+
+    off(type, handler) {
+        const set = this._listeners.get(type);
+        if (!set) return false;
+        const removed = set.delete(handler);
+        if (set.size === 0) this._listeners.delete(type);
+        return removed;
+    }
+
+    emit(type, payload) {
+        const set = this._listeners.get(type);
+        if (!set || set.size === 0) return 0;
+
+        let count = 0;
+        for (const handler of Array.from(set)) {
+            handler(payload, type);
+            count += 1;
+        }
+        return count;
+    }
+
+    clear(type = undefined) {
+        if (typeof type === 'undefined') {
+            this._listeners.clear();
+            return;
+        }
+        this._listeners.delete(type);
+    }
+}
+
+// src/core/logger.js
+const LEVELS = Object.freeze({
+    debug: 0,
+    info: 1,
+    warn: 2,
+    error: 3,
+    off: 4
+});
+
+export class Logger {
+    constructor({ level = 'info', sink = console } = {}) {
+        if (!(level in LEVELS)) {
+            throw new TypeError(`Unknown logger level: ${level}`);
+        }
+        this.level = level;
+        this.sink = sink;
+    }
+
+    setLevel(level) {
+        if (!(level in LEVELS)) {
+            throw new TypeError(`Unknown logger level: ${level}`);
+        }
+        this.level = level;
+    }
+
+    debug(...args) {
+        if (LEVELS[this.level] <= LEVELS.debug) this.sink.debug(...args);
+    }
+
+    info(...args) {
+        if (LEVELS[this.level] <= LEVELS.info) this.sink.info(...args);
+    }
+
+    warn(...args) {
+        if (LEVELS[this.level] <= LEVELS.warn) this.sink.warn(...args);
+    }
+
+    error(...args) {
+        if (LEVELS[this.level] <= LEVELS.error) this.sink.error(...args);
+    }
+}
+
+export { LEVELS as LoggerLevels };
+
+// src/core/pluginManager.js
+import { EngineError } from './errors.js';
+
+function lifecycleName(event) {
+    return `on${event.charAt(0).toUpperCase()}${event.slice(1)}`;
+}
+
+export class PluginManager {
+    constructor() {
+        this._plugins = new Map();
+    }
+
+    register(plugin, world) {
+        if (!plugin || typeof plugin !== 'object') {
+            throw new EngineError('E_PLUGIN', 'Plugin must be an object.');
+        }
+        if (this._plugins.has(plugin)) {
+            throw new EngineError('E_PLUGIN_EXISTS', 'Plugin is already registered.');
+        }
+
+        const cleanup = typeof plugin.install === 'function' ? plugin.install(world) : undefined;
+        this._plugins.set(plugin, { cleanup });
+        return plugin;
+    }
+
+    unregister(plugin, world) {
+        const record = this._plugins.get(plugin);
+        if (!record) return false;
+
+        if (typeof plugin.uninstall === 'function') {
+            plugin.uninstall(world);
+        }
+        if (typeof record.cleanup === 'function') {
+            record.cleanup(world);
+        }
+
+        this._plugins.delete(plugin);
+        return true;
+    }
+
+    notify(event, world, payload = undefined) {
+        const method = lifecycleName(event);
+        for (const plugin of this._plugins.keys()) {
+            const handler = plugin[method];
+            if (typeof handler === 'function') {
+                handler.call(plugin, world, payload);
+            }
+        }
+    }
+
+    clear(world) {
+        for (const plugin of Array.from(this._plugins.keys())) {
+            this.unregister(plugin, world);
+        }
+    }
+
+    has(plugin) {
+        return this._plugins.has(plugin);
+    }
+
+    list() {
+        return Array.from(this._plugins.keys());
+    }
+}
+
+// src/core/query.js
+import { EngineError } from './errors.js';
+
+function normalizeList(value) {
+    if (!Array.isArray(value)) {
+        throw new EngineError('E_QUERY', 'Query filters must be arrays.');
+    }
+    for (const entry of value) {
+        if (typeof entry !== 'string' || entry.length === 0) {
+            throw new EngineError('E_QUERY', 'Query component names must be non-empty strings.');
+        }
+    }
+    return value.slice();
+}
+
+export class Query {
+    constructor({ all = [], any = [], none = [] } = {}) {
+        this.all = normalizeList(all);
+        this.any = normalizeList(any);
+        this.none = normalizeList(none);
+    }
+
+    matches(world, entity) {
+        for (const name of this.all) {
+            if (!world.hasComponent(entity, name)) return false;
+        }
+
+        if (this.any.length > 0) {
+            let matched = false;
+            for (const name of this.any) {
+                if (world.hasComponent(entity, name)) {
+                    matched = true;
+                    break;
+                }
+            }
+            if (!matched) return false;
+        }
+
+        for (const name of this.none) {
+            if (world.hasComponent(entity, name)) return false;
+        }
+
+        return true;
+    }
+
+    entities(world) {
+        if (this.all.length === 0 && this.any.length === 0 && this.none.length === 0) {
+            return world.entities();
+        }
+
+        let candidates = null;
+
+        if (this.all.length > 0) {
+            let smallest = null;
+            for (const name of this.all) {
+                const storage = world.componentStorage(name);
+                if (smallest === null || storage.size() < smallest.size()) {
+                    smallest = storage;
+                }
+            }
+            candidates = smallest ? smallest.entities() : [];
+        } else if (this.any.length > 0) {
+            const set = new Set();
+            for (const name of this.any) {
+                const storage = world.componentStorage(name);
+                for (const entity of storage.entities()) set.add(entity);
+            }
+            candidates = Array.from(set);
+        } else {
+            candidates = world.entities();
+        }
+
+        const result = [];
+        for (const entity of candidates) {
+            if (this.matches(world, entity)) {
+                result.push(entity);
+            }
+        }
+        return result;
+    }
+}
+
+// src/core/system.js
+export class System {
+    constructor({ name = '', phase = 'update', order = 0, enabled = true } = {}) {
+        this.name = name;
+        this.phase = phase;
+        this.order = order;
+        this.enabled = enabled;
+    }
+
+    update() {}
+    fixedUpdate() {}
+    lateUpdate() {}
+}
+
+// src/core/systemScheduler.js
+import { EngineError } from './errors.js';
+
+const VALID_PHASES = new Set(['update', 'fixedUpdate', 'lateUpdate']);
+
+export class SystemScheduler {
+    constructor() {
+        this._phases = new Map();
+        this._records = new Map();
+        this._sequence = 0;
+    }
+
+    register(system, options = {}) {
+        if (!system || typeof system !== 'object') {
+            throw new EngineError('E_SYSTEM', 'System must be an object.');
+        }
+
+        const phase = options.phase ?? system.phase ?? 'update';
+        if (!VALID_PHASES.has(phase)) {
+            throw new EngineError('E_SYSTEM_PHASE', `Invalid system phase "${phase}".`);
+        }
+
+        const record = {
+            system,
+            phase,
+            order: options.order ?? system.order ?? 0,
+            enabled: options.enabled ?? system.enabled ?? true,
+            sequence: this._sequence++
+        };
+
+        const list = this._phases.get(phase) ?? [];
+        const index = list.findIndex((entry) => entry.order > record.order || (entry.order === record.order && entry.sequence > record.sequence));
+        if (index === -1) {
+            list.push(record);
+        } else {
+            list.splice(index, 0, record);
+        }
+        this._phases.set(phase, list);
+        this._records.set(system, record);
+        return system;
+    }
+
+    unregister(system) {
+        const record = this._records.get(system);
+        if (!record) return false;
+
+        const list = this._phases.get(record.phase);
+        if (list) {
+            const index = list.indexOf(record);
+            if (index !== -1) list.splice(index, 1);
+            if (list.length === 0) this._phases.delete(record.phase);
+        }
+
+        this._records.delete(system);
+        return true;
+    }
+
+    setEnabled(system, enabled) {
+        const record = this._records.get(system);
+        if (!record) return false;
+        record.enabled = Boolean(enabled);
+        return true;
+    }
+
+    run(phase, world, dt) {
+        const list = this._phases.get(phase);
+        if (!list || list.length === 0) return;
+
+        for (const record of list) {
+            if (!record.enabled) continue;
+            const fn = record.system[phase];
+            if (typeof fn === 'function') {
+                fn.call(record.system, world, dt);
+            }
+        }
+    }
+
+    clear() {
+        this._phases.clear();
+        this._records.clear();
+        this._sequence = 0;
+    }
+}
+
+// src/core/world.js
+import { EngineError } from './errors.js';
+import { Logger } from './logger.js';
+import { EventBus } from './eventBus.js';
+import { EntityManager } from './entityManager.js';
+import { ComponentRegistry } from './componentRegistry.js';
+import { Query } from './query.js';
+import { SystemScheduler } from './systemScheduler.js';
+import { PluginManager } from './pluginManager.js';
+
+export class World {
+    constructor({
+        logger = new Logger(),
+        eventBus = new EventBus()
+    } = {}) {
+        this.logger = logger;
+        this.events = eventBus;
+
+        this.entitiesManager = new EntityManager();
+        this.components = new ComponentRegistry();
+        this.systems = new SystemScheduler();
+        this.plugins = new PluginManager();
+    }
+
+    defineComponent(name, schema) {
+        return this.components.define(name, schema);
+    }
+
+    componentStorage(name) {
+        return this.components.storage(name);
+    }
+
+    createEntity() {
+        return this.entitiesManager.create();
+    }
+
+    destroyEntity(entity) {
+        if (!this.entitiesManager.has(entity)) return false;
+
+        this.components.forEachStorage((storage) => {
+            storage.delete(entity);
+        });
+
+        return this.entitiesManager.destroy(entity);
+    }
+
+    entities() {
+        return this.entitiesManager.all();
+    }
+
+    hasEntity(entity) {
+        return this.entitiesManager.has(entity);
+    }
+
+    addComponent(entity, name, data = {}) {
+        this._assertEntity(entity);
+        const storage = this.components.storage(name);
+        return storage.create(entity, data);
+    }
+
+    setComponent(entity, name, value) {
+        this._assertEntity(entity);
+        const storage = this.components.storage(name);
+        if (value === null || typeof value !== 'object') {
+            throw new EngineError('E_COMPONENT_VALUE', `Component "${name}" value must be an object.`);
+        }
+        return storage.set(entity, value);
+    }
+
+    getComponent(entity, name) {
+        this._assertEntity(entity);
+        return this.components.storage(name).get(entity);
+    }
+
+    hasComponent(entity, name) {
+        if (!this.entitiesManager.has(entity)) return false;
+        return this.components.storage(name).has(entity);
+    }
+
+    removeComponent(entity, name) {
+        this._assertEntity(entity);
+        return this.components.storage(name).delete(entity);
+    }
+
+    query(filter = {}) {
+        return new Query(filter).entities(this);
+    }
+
+    registerSystem(system, options = {}) {
+        return this.systems.register(system, options);
+    }
+
+    unregisterSystem(system) {
+        return this.systems.unregister(system);
+    }
+
+    update(dt) {
+        this.systems.run('update', this, dt);
+    }
+
+    fixedUpdate(dt) {
+        this.systems.run('fixedUpdate', this, dt);
+    }
+
+    lateUpdate(dt) {
+        this.systems.run('lateUpdate', this, dt);
+    }
+
+    use(plugin) {
+        return this.plugins.register(plugin, this);
+    }
+
+    unuse(plugin) {
+        return this.plugins.unregister(plugin, this);
+    }
+
+    notifyLifecycle(event, payload = undefined) {
+        this.plugins.notify(event, this, payload);
+    }
+
+    on(type, handler) {
+        return this.events.on(type, handler);
+    }
+
+    off(type, handler) {
+        return this.events.off(type, handler);
+    }
+
+    emit(type, payload) {
+        return this.events.emit(type, payload);
+    }
+
+    clear() {
+        this.plugins.clear(this);
+        this.systems.clear();
+        this.components.clear();
+        this.entitiesManager.clear();
+        this.events.clear();
+    }
+
+    _assertEntity(entity) {
+        if (!this.entitiesManager.has(entity)) {
+            throw new EngineError('E_ENTITY', `Entity ${entity} does not exist.`);
+        }
+    }
+}
+
+## Overview
+
+This engine core provides a minimal, extensible foundation built around an Entity Component System (ECS), a small runtime loop, a plugin layer, an event bus, and standalone math primitives.
+
+It intentionally excludes transforms, hierarchy, scenes, rendering, input, physics, animation, and UI.
+
+## Guarantees
+
+* No global engine state
+* No scene graph
+* No transform system in core
+* No rendering/input/physics/asset loading in core
+* Deterministic fixed-step execution
+* Explicit registration for systems and plugins
